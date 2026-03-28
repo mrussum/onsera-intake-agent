@@ -1,0 +1,14 @@
+langgraph==0.2.38
+langchain==0.3.7
+langchain-anthropic==0.2.4
+langchain-core==0.3.15
+anthropic==0.37.1
+groq==0.11.0
+fastapi==0.115.2
+uvicorn[standard]==0.31.0
+python-multipart==0.0.12
+pydantic==2.9.2
+python-dotenv==1.0.1
+# ragas 0.2.x adds langchain 0.3.x support (0.1.x conflicts with langchain>=0.3)
+ragas==0.2.6
+datasets==3.0.1
