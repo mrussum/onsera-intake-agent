@@ -70,9 +70,10 @@ check_env()
 def make_mock_transcribe(transcript: str):
     """Return a transcribe replacement that injects `transcript` directly into state."""
     def mock_transcribe(state):
-        latency = state.get("latency_ms", {})
-        latency["transcribe"] = 0.0  # Mocked — no actual Groq call
-        return {"transcript": transcript, "latency_ms": latency}
+        return {
+            "transcript": transcript,
+            "latency_ms": {**state.get("latency_ms", {}), "transcribe": 0.0},
+        }
     return mock_transcribe
 
 
@@ -105,6 +106,7 @@ def run_pipeline(transcript: str) -> dict:
                 "clinical_summary": "",
                 "requires_human_review": False,
                 "human_review_note": "",
+                "extraction_failed": False,
                 "latency_ms": {},
                 "messages": [],
             }

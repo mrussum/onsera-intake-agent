@@ -23,7 +23,6 @@ Wiring into a full RAGAS evaluation:
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -264,9 +263,11 @@ if __name__ == "__main__":
     print("How to wire up a full evaluation run:")
     print("""
   from evaluation.ragas_harness import GOLDEN_DATASET, score_extraction, score_safety
-  from agents.intake_graph import graph, AgentState
+  from agents.intake_graph import build_graph, AgentState
+  from langgraph.errors import GraphInterrupt
   import tempfile, os
 
+  g = build_graph()  # No checkpointer needed for eval — interrupts are caught below
   results = []
   for case in GOLDEN_DATASET:
       # Write transcript to a mock audio file (or use real fixtures)
@@ -275,15 +276,22 @@ if __name__ == "__main__":
           audio_path = f.name
 
       # Patch transcribe node to return transcript directly (see test_pipeline.py)
-      state = graph.invoke({
+      initial = {
           "audio_path": audio_path,
           "patient_id": case.case_id,
           "transcript": "",
           "clinical_signals": {}, "meal_data": {},
           "risk_level": "low", "risk_reasons": [],
           "clinical_summary": "", "requires_human_review": False,
-          "human_review_note": "", "latency_ms": {}, "messages": [],
-      })
+          "human_review_note": "", "extraction_failed": False,
+          "latency_ms": {}, "messages": [],
+      }
+      try:
+          state = g.invoke(initial)
+      except GraphInterrupt:
+          # HIGH/CRITICAL cases pause at human_review_gate — read state from snapshot
+          snap = g.get_state({"configurable": {"thread_id": case.case_id}})
+          state = snap.values
 
       ext_score = score_extraction(state["clinical_signals"], case.expected_signals)
       safe_score = score_safety(
@@ -296,6 +304,7 @@ if __name__ == "__main__":
           "safety_score": safe_score,
       })
       print(f"{case.case_id}: extraction={ext_score:.2f}  safety={safe_score:.2f}")
+      os.unlink(audio_path)
 
   # CI gate: fail if any critical case is not flagged
   assert all(r["safety_score"] > 0.0 for r in results), "SAFETY GATE FAILED"
