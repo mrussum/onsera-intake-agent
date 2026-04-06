@@ -1,0 +1,19 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+# E = pycodestyle errors, F = pyflakes, W = pycodestyle warnings
+select = ["E", "F", "W"]
+ignore = [
+    "E501",  # line too long — not enforced (120 is a soft guide)
+    "E402",  # module-level import not at top — sys.path manipulation in test files
+    "F841",  # local variable assigned but never used — kept for readability in some nodes
+]
+exclude = [
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "*.egg-info",
+]
