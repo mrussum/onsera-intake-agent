@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+const API_KEY  = import.meta.env.VITE_API_KEY  || "";
+
+/** Returns headers with X-API-Key injected (if a key is configured). */
+function apiHeaders(extra = {}) {
+  return API_KEY ? { "X-API-Key": API_KEY, ...extra } : extra;
+}
 
 // ---------------------------------------------------------------------------
 // Risk colour palette
@@ -170,7 +176,7 @@ function ApprovePanel({ jobId, onApproved }) {
     form.append("clinician_note", note || "Approved by clinician.");
     try {
       const res = await fetch(`${API_BASE}/intake/${jobId}/approve`, {
-        method: "POST", body: form,
+        method: "POST", body: form, headers: apiHeaders(),
       });
       if (!res.ok) {
         const d = await res.json();
@@ -231,7 +237,7 @@ function DetailModal({ intake, onClose, onRefresh }) {
       setPolling(true);
       pollRef.current = setInterval(async () => {
         try {
-          const r = await fetch(`${API_BASE}/intake/${localIntake.job_id}`);
+          const r = await fetch(`${API_BASE}/intake/${localIntake.job_id}`, { headers: apiHeaders() });
           const updated = await r.json();
           setLocalIntake(updated);
           if (updated.status === "complete" || updated.status === "error") {
@@ -452,7 +458,7 @@ function VoiceRecorder({ onSubmit }) {
     form.append("patient_id", patientId.trim());
 
     try {
-      const res = await fetch(`${API_BASE}/intake`, { method: "POST", body: form });
+      const res = await fetch(`${API_BASE}/intake`, { method: "POST", body: form, headers: apiHeaders() });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
         throw new Error(d.detail || `HTTP ${res.status}`);
@@ -463,7 +469,7 @@ function VoiceRecorder({ onSubmit }) {
 
       pollInterval.current = setInterval(async () => {
         try {
-          const r = await fetch(`${API_BASE}/intake/${data.job_id}`);
+          const r = await fetch(`${API_BASE}/intake/${data.job_id}`, { headers: apiHeaders() });
           const job = await r.json();
 
           if (job.status === "complete") {
@@ -554,7 +560,7 @@ export default function App() {
   const fetchDashboard = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/dashboard`);
+      const res = await fetch(`${API_BASE}/dashboard`, { headers: apiHeaders() });
       if (res.ok) {
         const data = await res.json();
         setIntakes(data);

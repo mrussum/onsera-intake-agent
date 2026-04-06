@@ -26,11 +26,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
+from auth.auth import ensure_admin_key, require_auth  # noqa: E402
 from db import database as db  # noqa: E402 — after load_dotenv so DB_PATH env is set
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
@@ -75,9 +76,15 @@ _RISK_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 @app.on_event("startup")
 def _startup() -> None:
-    """Initialise the SQLite database on server start."""
+    """Initialise the SQLite database and seed the admin API key on server start."""
     db.init_db()
     logger.info("Database initialised at %s", db.DB_PATH)
+    raw_key = ensure_admin_key(db_path=db.DB_PATH)
+    if raw_key:
+        logger.warning("=" * 60)
+        logger.warning("*** ADMIN API KEY (shown once — store it now) ***")
+        logger.warning("  %s", raw_key)
+        logger.warning("=" * 60)
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +243,7 @@ def _finalise_job(job_id: str, patient_id: str, result: dict, t_start: float) ->
 async def create_intake(
     audio: UploadFile = File(...),
     patient_id: str = Form(...),
+    _auth: str = Depends(require_auth),
 ):
     """
     Accept a voice recording and patient ID.
@@ -281,7 +289,7 @@ async def create_intake(
 # ---------------------------------------------------------------------------
 
 @app.get("/intake/{job_id}")
-async def get_intake(job_id: str):
+async def get_intake(job_id: str, _auth: str = Depends(require_auth)):
     """Poll job status. Returns full result fields once complete or awaiting_review."""
     job = db.get_job(job_id)
     if job is None:
@@ -297,6 +305,7 @@ async def get_intake(job_id: str):
 async def approve_intake(
     job_id: str,
     clinician_note: str = Form(default="Approved by clinician."),
+    _auth: str = Depends(require_auth),
 ):
     """
     Resume a paused intake after clinician review.
@@ -325,7 +334,7 @@ async def approve_intake(
 # ---------------------------------------------------------------------------
 
 @app.get("/dashboard")
-async def dashboard():
+async def dashboard(_auth: str = Depends(require_auth)):
     """
     All intakes (complete + awaiting_review) sorted by risk then recency.
     Includes summary_preview (first 200 chars of clinical_summary).

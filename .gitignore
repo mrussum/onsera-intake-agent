@@ -1,5 +1,8 @@
 # Environment variables — never commit secrets
 .env
+.env.local
+frontend/.env.local
+*.db
 
 # Python
 backend/venv/

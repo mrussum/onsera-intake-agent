@@ -57,6 +57,15 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 """
 
+_CREATE_API_KEYS_TABLE = """
+CREATE TABLE IF NOT EXISTS api_keys (
+    key_hash     TEXT PRIMARY KEY,
+    label        TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL,
+    last_used_at TEXT
+);
+"""
+
 
 def _connect(db_path: str = DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -65,10 +74,11 @@ def _connect(db_path: str = DB_PATH) -> sqlite3.Connection:
 
 
 def init_db(db_path: str = DB_PATH) -> None:
-    """Create the jobs table and enable WAL mode. Safe to call multiple times."""
+    """Create all tables and enable WAL mode. Safe to call multiple times."""
     with _connect(db_path) as conn:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute(_CREATE_JOBS_TABLE)
+        conn.execute(_CREATE_API_KEYS_TABLE)
         conn.commit()
 
 
@@ -176,3 +186,50 @@ def count_by_status(db_path: str = DB_PATH) -> dict[str, int]:
             "SELECT status, COUNT(*) AS n FROM jobs GROUP BY status"
         ).fetchall()
     return {row["status"]: row["n"] for row in rows}
+
+
+# ---------------------------------------------------------------------------
+# API key CRUD
+# ---------------------------------------------------------------------------
+
+def create_api_key(key_hash: str, label: str = "", db_path: str = DB_PATH) -> None:
+    """Store a new hashed API key. Silently ignores duplicate key_hash."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect(db_path) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO api_keys (key_hash, label, created_at) VALUES (?, ?, ?)",
+            (key_hash, label, now),
+        )
+        conn.commit()
+
+
+def get_api_key(key_hash: str, db_path: str = DB_PATH) -> dict | None:
+    """Return the api_keys row for `key_hash`, or None if not found."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM api_keys WHERE key_hash = ?", (key_hash,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def validate_api_key(key_hash: str, db_path: str = DB_PATH) -> bool:
+    """Return True if `key_hash` exists in the api_keys table."""
+    return get_api_key(key_hash, db_path=db_path) is not None
+
+
+def touch_api_key(key_hash: str, db_path: str = DB_PATH) -> None:
+    """Update last_used_at for audit trail purposes."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE api_keys SET last_used_at = ? WHERE key_hash = ?",
+            (now, key_hash),
+        )
+        conn.commit()
+
+
+def api_key_count(db_path: str = DB_PATH) -> int:
+    """Return the total number of stored API keys."""
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM api_keys").fetchone()
+    return row["n"] if row else 0
