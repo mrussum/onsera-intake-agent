@@ -12,15 +12,13 @@ Design notes:
   - LangGraph pipeline runs in a ThreadPoolExecutor — never blocks the event loop.
   - GraphInterrupt (from NodeInterrupt in human_review_gate) is caught and sets
     job status to "awaiting_review". The approve endpoint resumes the graph.
-  - job_store mutations are protected by a threading.Lock (dict.update() from
-    the thread pool is not atomic relative to reads on the asyncio thread).
+  - All job state is persisted in SQLite (db/database.py) — survives restarts.
   - Audio files are validated for MIME type and size before processing.
 """
 
 import asyncio
 import logging
 import os
-import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -33,6 +31,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
+from db import database as db  # noqa: E402 — after load_dotenv so DB_PATH env is set
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 # App setup
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="Onsera Intake Agent", version="1.1.0")
+app = FastAPI(title="Onsera Intake Agent", version="1.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -66,10 +66,6 @@ ALLOWED_AUDIO_TYPES = {
     "audio/mpeg", "audio/mp3", "audio/x-m4a", "application/octet-stream",
 }
 
-# In-memory job store: { job_id: { status, created_at, result, ... } }
-job_store: dict[str, dict] = {}
-_job_store_lock = threading.Lock()
-
 # Thread pool for running the synchronous LangGraph pipeline
 _executor = ThreadPoolExecutor(max_workers=4)
 
@@ -77,14 +73,11 @@ _executor = ThreadPoolExecutor(max_workers=4)
 _RISK_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
-# ---------------------------------------------------------------------------
-# Thread-safe job_store helpers
-# ---------------------------------------------------------------------------
-
-def _update_job(job_id: str, fields: dict) -> None:
-    """Update job_store[job_id] under lock."""
-    with _job_store_lock:
-        job_store[job_id].update(fields)
+@app.on_event("startup")
+def _startup() -> None:
+    """Initialise the SQLite database on server start."""
+    db.init_db()
+    logger.info("Database initialised at %s", db.DB_PATH)
 
 
 # ---------------------------------------------------------------------------
@@ -131,9 +124,7 @@ def _run_pipeline(job_id: str, audio_path: str, patient_id: str) -> None:
 
     except GraphInterrupt as interrupt:
         # human_review_gate fired NodeInterrupt — graph is paused
-        # The interrupt value is the dict passed to NodeInterrupt(...)
         interrupt_payload = interrupt.args[0] if interrupt.args else [{}]
-        # interrupt_payload is a list of Interrupt objects in LangGraph 0.2
         payload = {}
         if hasattr(interrupt_payload, "__iter__"):
             for item in interrupt_payload:
@@ -141,7 +132,6 @@ def _run_pipeline(job_id: str, audio_path: str, patient_id: str) -> None:
                     payload = item.value
                     break
 
-        # Snapshot current graph state for the dashboard
         snapshot = graph.get_state(config)
         snap_values = snapshot.values if snapshot else {}
 
@@ -149,10 +139,9 @@ def _run_pipeline(job_id: str, audio_path: str, patient_id: str) -> None:
         if hasattr(risk_level, "value"):
             risk_level = risk_level.value
 
-        _update_job(job_id, {
+        db.update_job(job_id, {
             "status": "awaiting_review",
             "paused_at": datetime.now(timezone.utc).isoformat(),
-            "patient_id": patient_id,
             "transcript": snap_values.get("transcript", ""),
             "clinical_signals": snap_values.get("clinical_signals", {}),
             "meal_data": snap_values.get("meal_data", {}),
@@ -167,7 +156,7 @@ def _run_pipeline(job_id: str, audio_path: str, patient_id: str) -> None:
 
     except Exception:
         logger.exception("pipeline error | job=%s", job_id)
-        _update_job(job_id, {
+        db.update_job(job_id, {
             "status": "error",
             "error": "Pipeline execution failed — see server logs.",
             "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -183,9 +172,6 @@ def _resume_pipeline(job_id: str, clinician_note: str) -> None:
     """
     Resume a paused graph from the MemorySaver checkpoint.
     Called by the approve endpoint in the thread pool.
-
-    Passes None as input so LangGraph resumes from the saved state.
-    Updates human_review_note with the clinician's comment before resuming.
     """
     from agents.intake_graph import graph
     from langgraph.errors import GraphInterrupt
@@ -195,22 +181,22 @@ def _resume_pipeline(job_id: str, clinician_note: str) -> None:
 
     config = {"configurable": {"thread_id": job_id}}
 
-    # Inject clinician note into the checkpointed state before resuming
     if clinician_note:
         graph.update_state(config, {"human_review_note": clinician_note})
 
-    _update_job(job_id, {"status": "processing"})
+    db.update_job(job_id, {"status": "processing"})
 
     try:
         result = graph.invoke(None, config=config)
-        _finalise_job(job_id, job_store[job_id].get("patient_id", "unknown"), result, t_start)
+        job = db.get_job(job_id)
+        patient_id = job.get("patient_id", "unknown") if job else "unknown"
+        _finalise_job(job_id, patient_id, result, t_start)
     except GraphInterrupt:
-        # Shouldn't happen on resume, but handle gracefully
         logger.error("Second interrupt on resume | job=%s", job_id)
-        _update_job(job_id, {"status": "awaiting_review"})
+        db.update_job(job_id, {"status": "awaiting_review"})
     except Exception:
         logger.exception("pipeline resume error | job=%s", job_id)
-        _update_job(job_id, {
+        db.update_job(job_id, {
             "status": "error",
             "error": "Resume execution failed — see server logs.",
             "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -218,16 +204,17 @@ def _resume_pipeline(job_id: str, clinician_note: str) -> None:
 
 
 def _finalise_job(job_id: str, patient_id: str, result: dict, t_start: float) -> None:
-    """Normalise and store a completed pipeline result."""
+    """Normalise and persist a completed pipeline result."""
     risk_level = result.get("risk_level", "low")
     if hasattr(risk_level, "value"):
         risk_level = risk_level.value
 
-    _update_job(job_id, {
+    total_ms = round((time.monotonic() - t_start) * 1000, 2)
+
+    db.update_job(job_id, {
         "status": "complete",
         "completed_at": datetime.now(timezone.utc).isoformat(),
-        "total_ms": round((time.monotonic() - t_start) * 1000, 2),
-        "patient_id": patient_id,
+        "total_ms": total_ms,
         "transcript": result.get("transcript", ""),
         "clinical_signals": result.get("clinical_signals", {}),
         "meal_data": result.get("meal_data", {}),
@@ -238,8 +225,7 @@ def _finalise_job(job_id: str, patient_id: str, result: dict, t_start: float) ->
         "human_review_note": result.get("human_review_note", ""),
         "latency_ms": result.get("latency_ms", {}),
     })
-    logger.info("pipeline complete | job=%s risk=%s total=%.0f ms",
-                job_id, risk_level, job_store[job_id].get("total_ms", 0))
+    logger.info("pipeline complete | job=%s risk=%s total=%.0f ms", job_id, risk_level, total_ms)
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +242,6 @@ async def create_intake(
     Validates file type and size, saves to disk, enqueues pipeline.
     Returns job_id immediately — poll GET /intake/{job_id} for status.
     """
-    # Validate MIME type
     content_type = audio.content_type or ""
     if content_type and content_type not in ALLOWED_AUDIO_TYPES:
         raise HTTPException(
@@ -267,7 +252,6 @@ async def create_intake(
 
     content = await audio.read()
 
-    # Validate file size
     if len(content) > MAX_AUDIO_BYTES:
         raise HTTPException(
             status_code=413,
@@ -283,14 +267,7 @@ async def create_intake(
     with open(audio_path, "wb") as f:
         f.write(content)
 
-    with _job_store_lock:
-        job_store[job_id] = {
-            "status": "processing",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "patient_id": patient_id,
-            "job_id": job_id,
-            "latency_ms": {},
-        }
+    db.create_job(job_id, patient_id)
 
     loop = asyncio.get_running_loop()
     loop.run_in_executor(_executor, _run_pipeline, job_id, audio_path, patient_id)
@@ -306,8 +283,7 @@ async def create_intake(
 @app.get("/intake/{job_id}")
 async def get_intake(job_id: str):
     """Poll job status. Returns full result fields once complete or awaiting_review."""
-    with _job_store_lock:
-        job = job_store.get(job_id)
+    job = db.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     return job
@@ -328,9 +304,7 @@ async def approve_intake(
     Resumes the LangGraph pipeline from the MemorySaver checkpoint —
     only generate_summary runs; all earlier nodes are skipped.
     """
-    with _job_store_lock:
-        job = job_store.get(job_id)
-
+    job = db.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     if job.get("status") != "awaiting_review":
@@ -356,21 +330,20 @@ async def dashboard():
     All intakes (complete + awaiting_review) sorted by risk then recency.
     Includes summary_preview (first 200 chars of clinical_summary).
     """
-    with _job_store_lock:
-        jobs = list(job_store.values())
+    jobs = db.list_jobs(statuses=("complete", "awaiting_review"))
 
-    visible = [j for j in jobs if j.get("status") in ("complete", "awaiting_review")]
-
-    visible.sort(key=lambda j: (
+    jobs.sort(key=lambda j: (
         _RISK_ORDER.get(j.get("risk_level", "low"), 3),
         -(
-            datetime.fromisoformat(j.get("completed_at") or j.get("paused_at") or j.get("created_at", "2000-01-01T00:00:00+00:00")).timestamp()
+            datetime.fromisoformat(
+                j.get("completed_at") or j.get("paused_at") or j.get("created_at", "2000-01-01T00:00:00+00:00")
+            ).timestamp()
         ),
     ))
 
     return [
         {**j, "summary_preview": (j.get("clinical_summary") or "")[:200]}
-        for j in visible
+        for j in jobs
     ]
 
 
@@ -380,9 +353,5 @@ async def dashboard():
 
 @app.get("/health")
 async def health():
-    with _job_store_lock:
-        counts = {}
-        for j in job_store.values():
-            s = j.get("status", "unknown")
-            counts[s] = counts.get(s, 0) + 1
+    counts = db.count_by_status()
     return {"status": "ok", "job_count": sum(counts.values()), "by_status": counts}

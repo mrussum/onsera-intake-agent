@@ -11,8 +11,13 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - GROQ_API_KEY=${GROQ_API_KEY}
       - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-5}
+      - DB_PATH=/data/onsera_intake.db
     volumes:
       - /tmp/onsera_audio:/tmp/onsera_audio
+      - onsera_db:/data
+
+volumes:
+  onsera_db:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
