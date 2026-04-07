@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: onsera-frontend
+  namespace: onsera
+  labels:
+    app: onsera-frontend
+spec:
+  # Frontend is stateless — can scale horizontally
+  replicas: 2
+  selector:
+    matchLabels:
+      app: onsera-frontend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: onsera-frontend
+    spec:
+      containers:
+        - name: frontend
+          # Build with:
+          #   docker build -f frontend/Dockerfile.prod \
+          #     --build-arg VITE_API_BASE="" \
+          #     --build-arg VITE_API_KEY=<key> \
+          #     -t onsera/frontend:latest frontend/
+          image: onsera/frontend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: false   # nginx requires root to bind port 80
+            readOnlyRootFilesystem: false

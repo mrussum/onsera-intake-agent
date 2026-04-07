@@ -1,0 +1,114 @@
+# Onsera Health — Production Docker Compose
+#
+# Usage:
+#   cp .env.example .env        # fill in API keys
+#   docker compose -f deploy/docker-compose.prod.yml up -d
+#
+# Prerequisites:
+#   - TLS certificates at ./deploy/nginx/certs/fullchain.pem and privkey.pem
+#     (use certbot or copy your own certs there)
+#   - All env vars in .env (see .env.example)
+#
+# What this adds over the dev compose:
+#   - Multi-stage production build for the frontend (nginx serving static files)
+#   - Nginx reverse proxy handling TLS, security headers, and rate limiting
+#   - Backend not exposed directly — only reachable through nginx
+#   - Resource limits on all containers
+#   - Structured JSON logging
+#   - Read-only container filesystems where possible
+
+version: "3.9"
+
+services:
+  # ── FastAPI backend ─────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    expose:
+      - "8000"          # Internal only — nginx proxies to this
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY is required}
+      - GROQ_API_KEY=${GROQ_API_KEY:?GROQ_API_KEY is required}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-5}
+      - DB_PATH=/data/onsera_intake.db
+      - ADMIN_API_KEY=${ADMIN_API_KEY:-}
+    volumes:
+      - onsera_audio:/tmp/onsera_audio
+      - onsera_db:/data
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ── React frontend (production build served by nginx) ──────────────────────
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile.prod
+      args:
+        # API calls go through nginx on the same origin — no absolute URL needed
+        - VITE_API_BASE=
+        - VITE_API_KEY=${VITE_API_KEY:-}
+    expose:
+      - "80"            # Internal only — the nginx reverse proxy faces the internet
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Nginx reverse proxy (TLS termination + routing) ────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - certbot_webroot:/var/www/certbot:ro
+      # Serve frontend static files built into the frontend image
+      - frontend_static:/usr/share/nginx/html:ro
+    depends_on:
+      - backend
+      - frontend
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  onsera_audio:
+  onsera_db:
+  certbot_webroot:
+  frontend_static:

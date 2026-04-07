@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: onsera-frontend
+  namespace: onsera
+  labels:
+    app: onsera-frontend
+spec:
+  type: ClusterIP
+  selector:
+    app: onsera-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80

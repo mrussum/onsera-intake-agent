@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: onsera-backend
+  namespace: onsera
+  labels:
+    app: onsera-backend
+spec:
+  # Single replica required — SQLite PVC is ReadWriteOnce and the
+  # MemorySaver checkpointer is in-process. See pvc.yaml comments.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: onsera-backend
+  strategy:
+    # Recreate avoids two pods trying to write the same SQLite file
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: onsera-backend
+    spec:
+      containers:
+        - name: backend
+          image: onsera/backend:latest   # Replace with your registry image
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: onsera-config
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: onsera-secrets
+                  key: ANTHROPIC_API_KEY
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: onsera-secrets
+                  key: GROQ_API_KEY
+            - name: ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: onsera-secrets
+                  key: ADMIN_API_KEY
+          volumeMounts:
+            - name: db-storage
+              mountPath: /data
+            - name: audio-storage
+              mountPath: /tmp/onsera_audio
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: false   # uvicorn writes temp files
+      volumes:
+        - name: db-storage
+          persistentVolumeClaim:
+            claimName: onsera-db
+        - name: audio-storage
+          persistentVolumeClaim:
+            claimName: onsera-audio
+      terminationGracePeriodSeconds: 60

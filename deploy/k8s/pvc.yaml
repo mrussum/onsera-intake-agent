@@ -1,0 +1,35 @@
+# Persistent storage for the SQLite database and audio temp files.
+#
+# SQLite requires ReadWriteOnce — only one backend pod may mount it at a time.
+# This constrains the backend to a single replica, which is the correct
+# deployment model for this system (the MemorySaver checkpointer also relies
+# on single-process state).
+#
+# For multi-replica backends, migrate to PostgreSQL and replace MemorySaver
+# with a shared checkpointer (see ADR-002).
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: onsera-db
+  namespace: onsera
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: standard   # Replace with your cluster's storage class
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: onsera-audio
+  namespace: onsera
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard

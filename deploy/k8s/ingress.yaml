@@ -1,0 +1,70 @@
+# Requires the nginx ingress controller:
+#   kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.0/deploy/static/provider/cloud/deploy.yaml
+#
+# TLS certificate via cert-manager (Let's Encrypt):
+#   kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+#   (then create a ClusterIssuer — see https://cert-manager.io/docs/configuration/acme/)
+#
+# Replace `onsera.example.com` with your actual domain.
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: onsera-ingress
+  namespace: onsera
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "52m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    # Rate limiting — adjust to match your traffic
+    nginx.ingress.kubernetes.io/limit-connections: "20"
+    nginx.ingress.kubernetes.io/limit-rpm: "60"
+    # Security headers
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header X-Content-Type-Options "nosniff" always;
+      add_header X-Frame-Options "DENY" always;
+      add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    # cert-manager TLS (comment out if managing certs manually)
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - onsera.example.com
+      secretName: onsera-tls
+  rules:
+    - host: onsera.example.com
+      http:
+        paths:
+          # API routes → backend
+          - path: /intake
+            pathType: Prefix
+            backend:
+              service:
+                name: onsera-backend
+                port:
+                  number: 8000
+          - path: /dashboard
+            pathType: Exact
+            backend:
+              service:
+                name: onsera-backend
+                port:
+                  number: 8000
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: onsera-backend
+                port:
+                  number: 8000
+          # Everything else → frontend SPA
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: onsera-frontend
+                port:
+                  number: 80
